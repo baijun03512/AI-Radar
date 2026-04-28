@@ -1,0 +1,15 @@
+[
+  {
+    "item_id": "sample-precision-1",
+    "relevant": true,
+    "pool_type": "precision",
+    "feed_date": "2026-04-28"
+  },
+  {
+    "item_id": "sample-exploration-1",
+    "relevant": false,
+    "pool_type": "exploration",
+    "feed_date": "2026-04-28"
+  }
+]
+

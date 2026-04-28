@@ -1,0 +1,23 @@
+{
+  "skill_id": "crawler_producthunt_v1",
+  "skill_type": "crawler",
+  "platform": "product_hunt",
+  "source_layer": "工业层",
+  "tool_name": "search_product_hunt",
+  "description": "Fetch recent top AI products from Product Hunt.",
+  "logic": "Use search_product_hunt for current top launches and keep summaries short.",
+  "input_template": {
+    "max_results": 10
+  },
+  "success_rate": 1.0,
+  "created_by": "manual",
+  "created_at": "2026-04-27T15:05:27.272654+00:00",
+  "last_used": "2026-04-28T03:43:10.566509+00:00",
+  "version": 1,
+  "usage_count": 60,
+  "success_count": 60,
+  "failure_count": 0,
+  "consecutive_failures": 0,
+  "heal_required": false,
+  "metadata": {}
+}

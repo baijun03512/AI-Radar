@@ -1,0 +1,15 @@
+[
+  {
+    "query": "这个产品是做什么的？",
+    "expected_intent": "exploratory"
+  },
+  {
+    "query": "它的技术原理是什么？",
+    "expected_intent": "deep_dive"
+  },
+  {
+    "query": "Compare MCP vs OpenAI Agents SDK",
+    "expected_intent": "comparison"
+  }
+]
+

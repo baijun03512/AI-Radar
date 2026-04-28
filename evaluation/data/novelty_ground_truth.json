@@ -1,0 +1,27 @@
+[
+  {
+    "item_id": "sample-1",
+    "title": "New agent benchmark for coding workflows",
+    "summary": "A fresh benchmark focused on real coding agent tasks and token usage.",
+    "source_platform": "arxiv",
+    "source_layer": "瀛︽湳灞?",
+    "source_url": "https://example.com/1",
+    "published_at": "2026-04-20T00:00:00+00:00",
+    "fetched_at": "2026-04-28T00:00:00+00:00",
+    "expected_label": "馃啎",
+    "is_known": false
+  },
+  {
+    "item_id": "sample-2",
+    "title": "Community feedback on agent workflow automation",
+    "summary": "Users discuss friction points and rollout patterns in production workflows.",
+    "source_platform": "reddit",
+    "source_layer": "绀惧尯灞?",
+    "source_url": "https://example.com/2",
+    "published_at": "2026-03-01T00:00:00+00:00",
+    "fetched_at": "2026-04-28T00:00:00+00:00",
+    "expected_label": "馃搶",
+    "is_known": false
+  }
+]
+

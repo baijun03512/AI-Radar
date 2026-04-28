@@ -1,0 +1,30 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+data/*.db
+data/*.db-journal
+.venv/
+venv/
+*.log
+.DS_Store
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# Local runtime state
+data/preferences.json
+data/crawler_cache/
+data/memory/
+data/__pycache__/
+tmp_feed.json
+YARS.log
+
+# Frontend local/build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+# Generated evaluation outputs
+evaluation/reports/

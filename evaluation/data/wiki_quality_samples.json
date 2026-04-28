@@ -1,0 +1,13 @@
+[
+  {
+    "name": "MCP",
+    "one_liner": "A standardized tool/server protocol layer for agent systems.",
+    "tags": ["industry", "tooling"],
+    "source_layer": "industry",
+    "tech_principle": "MCP separates tool invocation from application logic and standardizes how models talk to external capabilities.",
+    "product_impl": "Vendors can expose compatible servers and clients, which makes integration surfaces more reusable than one-off wrappers.",
+    "user_feedback": "Teams care about portability, governance, and whether the protocol reduces integration maintenance cost.",
+    "chat_notes": "Useful when comparing plugin layers, tool abstraction, and long-term agent ecosystem boundaries.",
+    "expected_min_score": 3.5
+  }
+]
