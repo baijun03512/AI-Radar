@@ -261,3 +261,111 @@ python -m ai_radar.evaluation.recommendation_eval evaluation/data/recommendation
 
 - [evaluation/CURRENT_EVAL_SNAPSHOT.md](./evaluation/CURRENT_EVAL_SNAPSHOT.md)
 
+## 8. 当前已知缺陷 / 局限
+
+### 8.1 评测数据匮乏
+
+评测脚本框架已就绪，但当前标注模板里都是示例数据，尚无真实标注集：
+
+- Novelty Scorer 准确率：脚本能跑通，数字无意义（ground truth 只有 3 条示例）
+- 推荐 Precision@K：依赖 `feed_history` 表有真实使用记录，冷启动时为空
+- 意图识别准确率：50 条测试集需要人工构造，暂未完成
+
+**影响**：`evaluation/` 下的指标当前只能验证脚本逻辑，无法给出有说服力的量化结果。
+
+### 8.2 偏好进化是轻量规则版
+
+当前偏好进化用的是最近 7 天行为的关键词统计（正向：open/save，负向：skip），
+产出 `boosted_topics / suppressed_topics`。
+
+局限：
+- 关键词从标题里提取，噪音大（标题里"AI"出现在每条里）
+- 没有语义聚类，不能识别"这两个词说的是同一个方向"
+- 冷启动期（前 7 天）行为样本少，统计结果不稳定
+
+**影响**：偏好进化方向对了，但精度有限，次日规划里的"推荐话题调整"效果需要积累 2–3 周数据才能明显感知。
+
+### 8.3 Filter Bubble 提示未在前端展示
+
+后端 `/api/feed` 已经返回 `filter_bubble_warning` 字段（连续 5 天探索池全跳过时为 true），
+但前端 `FeedPage` 目前没有读这个字段，不会有任何提示。
+
+### 8.4 Dashboard 缺历史趋势
+
+Dashboard「情报质量」Tab 展示的是当日快照，没有跨日趋势图。
+要看点开率/跳过率趋势，只能直接查 SQLite：
+
+```sql
+SELECT DATE(created_at), action, COUNT(*) FROM user_actions GROUP BY 1, 2;
+```
+
+`feed_history` 和 `user_actions` 表结构已建好，折线图是纯前端工作，尚未实现。
+
+### 8.5 Chat 意图类型未在前端展示
+
+后端 SSE `event: meta` 里已经包含 `intent_type`（`exploratory / deep_dive / comparison`），
+前端 `ChatPage` 目前没有渲染这个字段。
+
+### 8.6 信息源覆盖有限
+
+当前接入：arXiv、Product Hunt、Reddit（via YARS）。
+
+未接入：小红书、即刻、36氪、GitHub Releases、Hacker News。
+YARS 是非官方 Reddit 客户端，若 Reddit 改动反爬策略可能失效。
+
+### 8.7 Memory Agent 写入依赖 Notion
+
+所有知识沉淀写入 Notion，对网络和 Notion API 可用性强依赖。
+Notion 限流（3 req/s）在批量写入时会触发队列等待。
+
+---
+
+## 9. 后续可以继续做的方向
+
+按优先级排：
+
+### 9.1 补真实评测数据（最直接的产出提升）
+
+最值得优先做，因为脚本都在，只缺数据：
+
+1. 手动标注 30 条内容的真实新颖度 → 运行 Novelty Scorer 三版本对比（LLM only / + arXiv 核查 / + 互审）
+2. 用系统真实跑 1–2 周后，从 `feed_history` + 人工标注感兴趣与否 → 跑 Precision@K
+3. 构造 50 条意图识别测试 query → 优化 system prompt 并对比提升
+
+这三件事做完，面试/演示时才有真实数字可以讲。
+
+### 9.2 Filter Bubble 前端提示
+
+纯前端改动，1 小时内可完成：
+`FeedPage` 读 `filter_bubble_warning` 字段，为 true 时在 Feed 顶部插入一条提示 banner。
+
+### 9.3 Dashboard 历史趋势图
+
+从 SQLite 读 `user_actions` 按日聚合，绘制点开率/跳过率折线图。
+`frontend/src/components/SparkLine.tsx` 组件骨架已存在，可以基于它扩展。
+
+### 9.4 偏好进化升级
+
+当前规则统计升级成语义聚类：
+- 对 `boosted_topics` 关键词做 embedding 聚类，合并同义方向
+- 或直接让 LLM 读近 7 天行为记录，产出结构化偏好 diff（更慢但更准）
+
+### 9.5 Chat 意图类型渲染
+
+`ChatPage` 顶部 header 里加一个小 tag，显示当前对话的意图类型
+（探索型 / 深度了解 / 对比分析），用 `event: meta` 里的 `intent_type` 字段。
+
+### 9.6 扩展信息源
+
+按接入难度排：
+- **Hacker News**：官方 API，免认证，难度低
+- **GitHub Releases**：官方 API，只需 GITHUB_TOKEN，难度低
+- **36氪 / 即刻**：无官方 API，需要爬虫，需要维护
+
+### 9.7 部署
+
+当前只能本地跑。最小可用部署方案：
+- 后端：Railway / Render 免费层，一键 deploy Python 服务
+- 前端：Vercel，`frontend/` 目录 import 即可
+- 需要把 `.env` 里的环境变量迁移到平台 Secrets
+
