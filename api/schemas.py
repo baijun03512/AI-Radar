@@ -48,6 +48,8 @@ class FeedActionResponse(BaseModel):
     ok: bool
     item_id: str
     action: str
+    notion_synced: bool | None = None
+    message: str = ""
 
 
 class PreferencesResponse(BaseModel):
@@ -80,6 +82,7 @@ class ChatRequest(BaseModel):
     query: str
     product_id: str = "general"
     product_name: str = "General"
+    product_context: str = ""
     max_per_tool: int = 2
     persist_memory: bool = True
     write_notion: bool = False

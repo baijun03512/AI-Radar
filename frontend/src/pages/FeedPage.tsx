@@ -107,11 +107,11 @@ function FeedCard({ item, index, saved, onOpen, onSave, onDismiss }: FeedCardPro
           进入对话
         </button>
         <button
-          onClick={(event) => {
+          onClick={async (event) => {
             event.stopPropagation();
-            onSave(item.id);
-            if (!saved) {
-              void recordAction(item.id, 'save', item);
+            const result = await recordAction(item.id, 'save', item);
+            if (result.ok) {
+              onSave(item.id);
             }
           }}
           style={{

@@ -52,14 +52,14 @@ def get_feed(services: AppServices = Depends(get_services)) -> FeedResponse:
     )
 
 
-@router.post("/{item_id}/action", response_model=FeedActionResponse)
+@router.post("/{item_id:path}/action", response_model=FeedActionResponse)
 def record_feed_action(
     item_id: str,
     request: FeedActionRequest,
     services: AppServices = Depends(get_services),
 ) -> FeedActionResponse:
     """Persist one feed interaction event."""
-    services.record_action(
+    result = services.record_action(
         item_id=item_id,
         action=request.action,
         item_title=request.item_title,
@@ -69,7 +69,13 @@ def record_feed_action(
         source_type=request.source_type,
         chat_turns=request.chat_turns,
     )
-    return FeedActionResponse(ok=True, item_id=item_id, action=request.action)
+    return FeedActionResponse(
+        ok=bool(result.get("ok", True)),
+        item_id=item_id,
+        action=request.action,
+        notion_synced=result.get("notion_synced"),
+        message=str(result.get("message", "")),
+    )
 
 
 def _serialize_feed_item(item: object) -> dict:

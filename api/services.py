@@ -23,12 +23,14 @@ from ..agents import (
 from ..data import get_db, init_db
 from ..runtime.tool_registry import ToolRegistry
 from ..runtime.llm_client import LLMClient
+from ..schemas.contracts import Feed, FeedItem
 from ..skills import SkillManager, SkillStorage
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = REPO_ROOT / "data"
 MEMORY_ROOT = DATA_ROOT / "memory"
 SKILLS_ROOT = DATA_ROOT / "skills"
+FEED_SNAPSHOT_ROOT = DATA_ROOT / "feed_snapshots"
 PREFERENCES_PATH = DATA_ROOT / "preferences.json"
 
 DEFAULT_PREFERENCES: dict[str, Any] = {
@@ -57,6 +59,8 @@ class AppServices:
         init_db(self.db_path)
         self.memory_dir = Path(self.memory_dir)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.feed_snapshot_dir = FEED_SNAPSHOT_ROOT
+        self.feed_snapshot_dir.mkdir(parents=True, exist_ok=True)
         self.preferences_path = Path(self.preferences_path)
         self.preferences_path.parent.mkdir(parents=True, exist_ok=True)
         self.saved_items_path = self.memory_dir / "saved_items.json"
@@ -99,6 +103,15 @@ class AppServices:
     def build_feed(self) -> dict[str, Any]:
         """Run the current feed pipeline and return feed plus diagnostics."""
         preferences = self.load_preferences()
+        snapshot_payload = self._load_feed_snapshot()
+        if snapshot_payload is not None:
+            self._feed_cache = {
+                "key": "daily_snapshot",
+                "expires_at": time.monotonic() + 180,
+                "payload": snapshot_payload,
+            }
+            return snapshot_payload
+
         cache_preferences = dict(preferences)
         cache_preferences.pop("exploration_ratio", None)
         cache_key = json.dumps(cache_preferences, sort_keys=True, ensure_ascii=False)
@@ -113,7 +126,8 @@ class AppServices:
             raise HTTPException(status_code=503, detail="No crawler tools registered")
 
         try:
-            plan = OrchestratorAgent(db_path=self.db_path).build_daily_plan(preferences)
+            llm = self._get_llm_client()
+            plan = OrchestratorAgent(db_path=self.db_path, llm_client=llm).build_daily_plan(preferences)
             from ..agents import CrawlerAgent  # local import to avoid cyclic module init edges
 
             crawler = CrawlerAgent(
@@ -126,7 +140,7 @@ class AppServices:
                 raise HTTPException(status_code=502, detail="Crawler returned no items")
 
             known_item_ids = self._known_item_ids()
-            scored = NoveltyScorerAgent().score_batch(crawl_result.items, known_item_ids=known_item_ids)
+            scored = NoveltyScorerAgent(llm_client=llm).score_batch(crawl_result.items, known_item_ids=known_item_ids)
             feed_result = RecommenderAgent(db_path=self.db_path).build_feed(scored, preferences=preferences)
             scored_by_id = {item.item_id: item for item in scored}
             self._localize_feed_items(feed_result.feed, scored_by_id=scored_by_id)
@@ -138,9 +152,11 @@ class AppServices:
                     "cached_platforms": crawl_result.report.cached_platforms,
                     "per_platform_counts": crawl_result.report.per_platform_counts,
                     "used_stale_feed": False,
+                    "loaded_from_snapshot": False,
                 },
                 "filter_bubble_warning": feed_result.filter_bubble_warning,
             }
+            self._write_feed_snapshot(payload)
             self._feed_cache = {
                 "key": cache_key,
                 "expires_at": now + 180,
@@ -148,6 +164,14 @@ class AppServices:
             }
             return payload
         except Exception as exc:
+            snapshot_payload = self._load_feed_snapshot(stale_reason=str(exc))
+            if snapshot_payload is not None:
+                self._feed_cache = {
+                    "key": "daily_snapshot",
+                    "expires_at": time.monotonic() + 180,
+                    "payload": snapshot_payload,
+                }
+                return snapshot_payload
             if self._feed_cache is not None and self._feed_cache.get("payload"):
                 stale_payload = dict(self._feed_cache["payload"])
                 diagnostics = dict(stale_payload.get("diagnostics", {}))
@@ -168,7 +192,7 @@ class AppServices:
         novelty_label: str | None = None,
         source_type: str | None = None,
         chat_turns: int = 0,
-    ) -> None:
+    ) -> dict[str, Any]:
         """Persist one user action row."""
         conn = get_db(self.db_path)
         try:
@@ -184,14 +208,16 @@ class AppServices:
         finally:
             conn.close()
         self._update_behavioral_preferences()
+        result = {"ok": True, "notion_synced": None, "message": ""}
         if action == "save":
-            self._save_item(
+            result = self._save_item(
                 item_id=item_id,
                 item_title=item_title,
                 one_liner=one_liner,
                 pool_type=pool_type,
                 source_type=source_type,
             )
+        return result
 
     def answer_chat(
         self,
@@ -199,6 +225,7 @@ class AppServices:
         query: str,
         product_id: str,
         product_name: str,
+        product_context: str = "",
         max_per_tool: int = 2,
         persist_memory: bool = True,
         write_notion: bool = False,
@@ -207,12 +234,14 @@ class AppServices:
         if not self.registry.names():
             raise HTTPException(status_code=503, detail="No chat tools registered")
 
-        result = ChatAgent(self.registry).answer_query(
+        agent = ChatAgent(self.registry, llm_client=self._get_llm_client())
+        result = agent.answer_query(
             query,
             product_name=product_name,
+            product_context=product_context,
             max_per_tool=max_per_tool,
         )
-        payload = ChatAgent(self.registry).build_memory_payload(
+        payload = agent.build_memory_payload(
             product_id=product_id,
             product_name=product_name,
             query=query,
@@ -221,11 +250,14 @@ class AppServices:
 
         memory_result = None
         if persist_memory:
-            memory_result = self.memory_agent.process_payload(
-                payload,
-                registry=self.registry,
-                write_notion=write_notion,
-            )
+            try:
+                memory_result = self.memory_agent.process_payload(
+                    payload,
+                    registry=self.registry,
+                    write_notion=write_notion,
+                )
+            except Exception:
+                memory_result = None
 
         return {
             "result": result,
@@ -553,7 +585,7 @@ class AppServices:
         one_liner: str,
         pool_type: str | None,
         source_type: str | None,
-    ) -> None:
+    ) -> dict[str, Any]:
         """Persist a saved item locally and mirror it to Notion when configured."""
         saved_items: list[dict[str, Any]] = []
         if self.saved_items_path.exists():
@@ -582,9 +614,9 @@ class AppServices:
         self.saved_items_path.write_text(json.dumps(saved_items, ensure_ascii=False, indent=2), encoding="utf-8")
 
         if "upsert_notion_wiki" not in self.registry.names():
-            return
+            return {"ok": True, "notion_synced": False, "message": "Notion sync tool unavailable"}
         if existing.get("notion_synced"):
-            return
+            return {"ok": True, "notion_synced": True, "message": "Already synced to Notion"}
         try:
             tags = [tag for tag in [source_type, pool_type, "saved_feed_item"] if tag]
             self.registry.execute(
@@ -596,8 +628,9 @@ class AppServices:
                 json.dumps(saved_items, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        except Exception:
-            return
+            return {"ok": True, "notion_synced": True, "message": "Saved and synced to Notion"}
+        except Exception as exc:
+            return {"ok": True, "notion_synced": False, "message": f"Notion sync failed: {exc}"}
 
     def _load_preferences_from_notion(self) -> dict[str, Any] | None:
         """Try to hydrate the local preferences file from the mirrored Notion page."""
@@ -721,3 +754,53 @@ class AppServices:
             if token not in tokens:
                 tokens.append(token)
         return tokens[:8]
+
+    def _feed_snapshot_path(self) -> Path:
+        """Return today's persisted feed snapshot path."""
+        return self.feed_snapshot_dir / f"{date.today().isoformat()}.json"
+
+    def _load_feed_snapshot(self, stale_reason: str | None = None) -> dict[str, Any] | None:
+        """Load today's feed snapshot from disk and hydrate dataclasses."""
+        path = self._feed_snapshot_path()
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            feed_payload = raw.get("feed", {})
+            feed = Feed(
+                feed_date=feed_payload.get("feed_date", date.today().isoformat()),
+                precision_pool=[
+                    FeedItem(**item) for item in feed_payload.get("precision_pool", [])
+                ],
+                exploration_pool=[
+                    FeedItem(**item) for item in feed_payload.get("exploration_pool", [])
+                ],
+            )
+            diagnostics = dict(raw.get("diagnostics", {}))
+            diagnostics["loaded_from_snapshot"] = True
+            if stale_reason:
+                diagnostics["used_stale_feed"] = True
+                diagnostics["stale_reason"] = stale_reason
+            payload = {
+                "feed": feed,
+                "diagnostics": diagnostics,
+                "filter_bubble_warning": bool(raw.get("filter_bubble_warning", False)),
+            }
+            return payload
+        except Exception:
+            return None
+
+    def _write_feed_snapshot(self, payload: dict[str, Any]) -> None:
+        """Persist today's feed snapshot so restarts do not fall back to demo cards."""
+        try:
+            serializable = {
+                "feed": asdict(payload["feed"]),
+                "diagnostics": payload.get("diagnostics", {}),
+                "filter_bubble_warning": payload.get("filter_bubble_warning", False),
+            }
+            self._feed_snapshot_path().write_text(
+                json.dumps(serializable, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return

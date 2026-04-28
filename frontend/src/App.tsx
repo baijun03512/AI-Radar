@@ -33,9 +33,9 @@ function App() {
     setPage('chat');
   };
 
-  const toggleSave = (id: string) => {
+  const markSaved = (id: string) => {
     setSavedIds((current) =>
-      current.includes(id) ? current.filter((savedId) => savedId !== id) : [...current, id],
+      current.includes(id) ? current : [...current, id],
     );
   };
 
@@ -53,7 +53,7 @@ function App() {
           <FeedPage
             onOpenChat={openChat}
             savedIds={savedIds}
-            onSave={toggleSave}
+            onSave={markSaved}
             onFeedCountChange={setFeedCount}
           />
         ) : null}
@@ -62,7 +62,7 @@ function App() {
           <ChatPage
             key={chatProduct?.id ?? 'no-product'}
             product={chatProduct}
-            onSave={toggleSave}
+            onSave={markSaved}
             saved={chatProduct != null && savedIds.includes(chatProduct.id)}
             onBack={() => setPage('feed')}
           />

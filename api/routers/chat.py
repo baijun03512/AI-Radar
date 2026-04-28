@@ -33,37 +33,41 @@ def stream_chat(
     services: AppServices = Depends(get_services),
 ) -> StreamingResponse:
     """Stream a grounded chat answer in SSE format."""
-    payload = services.answer_chat(
-        query=request.query,
-        product_id=request.product_id,
-        product_name=request.product_name,
-        max_per_tool=request.max_per_tool,
-        persist_memory=request.persist_memory,
-        write_notion=request.write_notion,
-    )
-    result = payload["result"]
-    memory_result = payload["memory_result"]
-
     def event_stream() -> str:
-        yield _sse(
-            "meta",
-            {
-                "intent_type": result.intent_type,
-                "sources_used": [
-                    {
-                        **source.__dict__,
-                        "source_type": SOURCE_TYPE_BY_LAYER.get(source.layer, "community"),
-                    }
-                    for source in result.sources_used
-                ],
-                "new_insights": result.new_insights,
-                "memory_persisted": memory_result is not None,
-                "quality_score": None if memory_result is None else memory_result.quality_score,
-            },
-        )
-        for chunk in _chunk_text(result.answer, size=120):
-            yield _sse("message", {"delta": chunk})
-        yield _sse("done", {"ok": True})
+        try:
+            payload = services.answer_chat(
+                query=request.query,
+                product_id=request.product_id,
+                product_name=request.product_name,
+                product_context=request.product_context,
+                max_per_tool=request.max_per_tool,
+                persist_memory=request.persist_memory,
+                write_notion=request.write_notion,
+            )
+            result = payload["result"]
+            memory_result = payload["memory_result"]
+
+            yield _sse(
+                "meta",
+                {
+                    "intent_type": result.intent_type,
+                    "sources_used": [
+                        {
+                            **source.__dict__,
+                            "source_type": SOURCE_TYPE_BY_LAYER.get(source.layer, "community"),
+                        }
+                        for source in result.sources_used
+                    ],
+                    "new_insights": result.new_insights,
+                    "memory_persisted": memory_result is not None,
+                    "quality_score": None if memory_result is None else memory_result.quality_score,
+                },
+            )
+            for chunk in _chunk_text(result.answer, size=120):
+                yield _sse("message", {"delta": chunk})
+            yield _sse("done", {"ok": True})
+        except Exception as exc:
+            yield _sse("error", {"detail": str(exc)})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

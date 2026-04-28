@@ -123,7 +123,7 @@ export function ChatPage({ product, onSave, saved, onBack }: ChatPageProps) {
         });
       },
       () => setLoading(false),
-      () => {
+      (message?: string) => {
         setLoading(false);
         setMessages((current) => {
           const copy = [...current];
@@ -131,7 +131,7 @@ export function ChatPage({ product, onSave, saved, onBack }: ChatPageProps) {
           if (!last.content) {
             copy[copy.length - 1] = {
               ...last,
-              content: '这次流式回答在返回正文前中断了，可以再试一次。',
+              content: message || '这次流式回答在返回正文前中断了，可以再试一次。',
             };
           }
           return copy;
@@ -196,10 +196,10 @@ export function ChatPage({ product, onSave, saved, onBack }: ChatPageProps) {
         </div>
 
         <button
-          onClick={() => {
-            onSave(product.id);
-            if (!saved) {
-              void recordAction(product.id, 'save', product);
+          onClick={async () => {
+            const result = await recordAction(product.id, 'save', product);
+            if (result.ok) {
+              onSave(product.id);
             }
           }}
           style={{

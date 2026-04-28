@@ -61,6 +61,12 @@ interface RawChatMetaSource {
   source_type?: SourceType;
 }
 
+interface FeedActionResult {
+  ok: boolean;
+  notion_synced?: boolean | null;
+  message?: string;
+}
+
 const MOCK_FEED: FeedItem[] = [
   {
     id: 'mock-gemini',
@@ -135,12 +141,12 @@ async function get<T>(path: string, timeoutMs = 5000): Promise<T> {
   return response.json();
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+async function post<T>(path: string, body: unknown, timeoutMs = 5000): Promise<T> {
   const response = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     throw new Error(`POST ${path} failed: ${response.status}`);
@@ -228,17 +234,23 @@ export async function recordAction(
   itemId: string,
   action: 'open' | 'skip' | 'save',
   item?: FeedItem,
-): Promise<void> {
+): Promise<FeedActionResult> {
   try {
-    await post(`/api/feed/${itemId}/action`, {
-      action,
-      item_title: item?.title ?? '',
-      one_liner: item?.oneLiner ?? '',
-      pool_type: item?.pool ?? null,
-      source_type: item?.source ?? null,
-    });
+    const timeoutMs = action === 'save' ? 20000 : 5000;
+    const safeItemId = encodeURIComponent(itemId);
+    return await post<FeedActionResult>(
+      `/api/feed/${safeItemId}/action`,
+      {
+        action,
+        item_title: item?.title ?? '',
+        one_liner: item?.oneLiner ?? '',
+        pool_type: item?.pool ?? null,
+        source_type: item?.source ?? null,
+      },
+      timeoutMs,
+    );
   } catch {
-    return;
+    return { ok: false, notion_synced: false, message: 'Action request failed' };
   }
 }
 
@@ -306,7 +318,7 @@ export function streamChat(
   onChunk: (text: string) => void,
   onMeta: (sources: SourceType[]) => void,
   onDone: () => void,
-  onError: () => void,
+  onError: (message?: string) => void,
 ): () => void {
   const controller = new AbortController();
 
@@ -322,12 +334,19 @@ export function streamChat(
           query,
           product_id: product.id,
           product_name: product.title,
+          product_context: product.oneLiner,
         }),
         signal: controller.signal,
       });
 
       if (!response.ok || !response.body) {
-        onError();
+        let detail = `POST /api/chat failed: ${response.status}`;
+        try {
+          detail = await response.text();
+        } catch {
+          // ignore read failure
+        }
+        onError(detail);
         return;
       }
 
@@ -347,6 +366,7 @@ export function streamChat(
           const payload = JSON.parse(dataLine) as {
             delta?: string;
             sources_used?: RawChatMetaSource[];
+            detail?: string;
           };
 
           if (eventName === 'meta') {
@@ -364,6 +384,9 @@ export function streamChat(
           if (eventName === 'done') {
             sawDone = true;
             onDone();
+          }
+          if (eventName === 'error') {
+            onError(payload.detail ?? 'Chat stream failed');
           }
         } catch {
           return;
@@ -393,7 +416,7 @@ export function streamChat(
         if (sawMessage) {
           onDone();
         } else {
-          onError();
+          onError('Chat stream ended before any content arrived');
         }
       }
     } catch (error) {
@@ -401,7 +424,7 @@ export function streamChat(
         if (sawMessage) {
           onDone();
         } else {
-          onError();
+          onError((error as Error).message);
         }
       }
     }

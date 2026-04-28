@@ -28,3 +28,5 @@ frontend/.env.local
 
 # Generated evaluation outputs
 evaluation/reports/
+
+data/feed_snapshots/

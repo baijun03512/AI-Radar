@@ -1,11 +1,43 @@
-"""Heuristic novelty scoring with evidence and lightweight verification."""
+"""Novelty scoring: heuristic baseline + optional LLM enhancement layer."""
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 from ..schemas.contracts import CrawledItem, ScoredItem
+
+logger = logging.getLogger(__name__)
+
+# Map LLM-friendly labels to the emoji contract used downstream.
+_LLM_LABEL_TO_EMOJI: dict[str, str] = {
+    "new": "🆕",
+    "update": "🔁",
+    "watch": "📌",
+}
+
+# Reverse map for reference.
+_EMOJI_TO_LLM_LABEL: dict[str, str] = {v: k for k, v in _LLM_LABEL_TO_EMOJI.items()}
+
+_NOVELTY_SYSTEM_PROMPT = """\
+You are the novelty-classification layer of an AI product radar.
+Given one crawled item and a baseline heuristic score, classify its novelty and
+explain your reasoning in one or two Chinese sentences.
+
+Rules:
+- "new"    → genuinely new technique, architecture, or product angle (score ≥ 0.72)
+- "update" → meaningful extension of existing knowledge (0.55 ≤ score < 0.72)
+- "watch"  → incremental or unclear novelty, worth monitoring (score < 0.55)
+
+You may propose a small score adjustment (score_delta) in [-0.15, +0.15] when the
+heuristic seems clearly wrong (e.g. the item is very recent but scored low, or it
+is obviously recycled content despite a high heuristic score).
+
+Respond ONLY with valid JSON, no markdown fences:
+{"label": "new|update|watch", "score_delta": <float>, "reason": "<Chinese 1-2 sentences>"}
+"""
 
 
 @dataclass
@@ -29,10 +61,18 @@ class NoveltyAssessment:
     evidence: list[str] = field(default_factory=list)
     reason: str = ""
     is_verified: bool = False
+    llm_enhanced: bool = False
 
 
 class NoveltyScorerAgent:
-    """Score crawled items for novelty using deterministic heuristics."""
+    """Score crawled items for novelty.
+
+    Uses deterministic heuristics as a reliable baseline.  When an LLMClient is
+    supplied the heuristic score is passed to the LLM which may refine the label,
+    add a small score delta, and produce a Chinese-language reason.  Any LLM
+    failure is silently caught and the heuristic result is used instead, so the
+    agent is always stable regardless of API availability.
+    """
 
     SOURCE_BASELINES = {
         "学术层": 0.75,
@@ -46,6 +86,16 @@ class NoveltyScorerAgent:
         "社区层": "💬",
     }
 
+    def __init__(self, llm_client: Optional[Any] = None) -> None:
+        """Initialise scorer.
+
+        Args:
+            llm_client: Optional LLMClient instance.  When provided the scorer
+                sends each item to the LLM for label refinement and Chinese
+                reasoning.  When None (default) pure heuristic scoring is used.
+        """
+        self._llm = llm_client
+
     def assess_item(
         self,
         item: CrawledItem,
@@ -53,7 +103,12 @@ class NoveltyScorerAgent:
         known_item_ids: set[str] | None = None,
         secondary_verify: bool = True,
     ) -> NoveltyAssessment:
-        """Produce a novelty assessment for one crawled item."""
+        """Produce a novelty assessment for one crawled item.
+
+        Heuristic scoring always runs first and provides the fallback result.
+        If an LLM client is available and the item has not been seen before,
+        the LLM layer attempts to refine the label, score, and reason.
+        """
         known = known_item_ids or set()
         evidence: list[str] = []
         dimensions = NoveltyDimensions(
@@ -78,10 +133,13 @@ class NoveltyScorerAgent:
             / 4,
             3,
         )
-        label = self._label_for_score(novelty_score, item.item_id in known)
+        # Known items are always labelled 🔁 regardless of LLM output.
+        is_known = item.item_id in known
+        label = self._label_for_score(novelty_score, is_known)
         verified = secondary_verify and self._secondary_verification(novelty_score, dimensions)
         reason = self._reason_from_dimensions(dimensions, item.source_layer)
-        return NoveltyAssessment(
+
+        assessment = NoveltyAssessment(
             item_id=item.item_id,
             novelty_label=label,
             novelty_score=novelty_score,
@@ -89,7 +147,14 @@ class NoveltyScorerAgent:
             evidence=evidence,
             reason=reason,
             is_verified=verified,
+            llm_enhanced=False,
         )
+
+        # LLM enhancement: only for new (unseen) items when a client is available.
+        if self._llm is not None and not is_known:
+            assessment = self._llm_enhance(item, assessment)
+
+        return assessment
 
     def score_batch(
         self,
@@ -119,6 +184,87 @@ class NoveltyScorerAgent:
                 )
             )
         return scored
+
+    # ------------------------------------------------------------------
+    # LLM enhancement
+    # ------------------------------------------------------------------
+
+    def _llm_enhance(self, item: CrawledItem, baseline: NoveltyAssessment) -> NoveltyAssessment:
+        """Call the LLM to refine label, score and reason.
+
+        Returns the original baseline assessment on any failure so the caller
+        never needs to handle exceptions from this method.
+        """
+        try:
+            user_msg = (
+                f"Title: {item.title}\n"
+                f"Summary: {(item.summary or '')[:400]}\n"
+                f"Source: {item.source_layer} ({item.source_platform})\n"
+                f"Heuristic novelty score: {baseline.novelty_score:.3f}\n\n"
+                "Classify this item and provide your reasoning."
+            )
+            response = self._llm.call(
+                messages=[{"role": "user", "content": user_msg}],
+                system=_NOVELTY_SYSTEM_PROMPT,
+                max_tokens=256,
+            )
+            parsed = self._parse_llm_novelty(response.text)
+            if parsed is None:
+                return baseline
+
+            llm_label_key, score_delta, reason = parsed
+            emoji_label = _LLM_LABEL_TO_EMOJI.get(llm_label_key, baseline.novelty_label)
+            adjusted_score = self._clamp(baseline.novelty_score + score_delta)
+
+            logger.debug(
+                "NoveltyScorerAgent LLM enhanced %s: %s → %s (delta=%.3f)",
+                item.item_id,
+                baseline.novelty_label,
+                emoji_label,
+                score_delta,
+            )
+
+            return NoveltyAssessment(
+                item_id=baseline.item_id,
+                novelty_label=emoji_label,
+                novelty_score=adjusted_score,
+                dimensions=baseline.dimensions,
+                evidence=baseline.evidence + [f"llm_label={llm_label_key}"],
+                reason=reason,
+                is_verified=baseline.is_verified,
+                llm_enhanced=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("NoveltyScorerAgent LLM enhancement failed, using heuristic: %s", exc)
+            return baseline
+
+    def _parse_llm_novelty(
+        self, text: str
+    ) -> tuple[str, float, str] | None:
+        """Parse LLM JSON output into (label, score_delta, reason).
+
+        Returns None when the output cannot be parsed or contains invalid values.
+        """
+        try:
+            # Strip accidental markdown code fences.
+            clean = text.strip().strip("```json").strip("```").strip()
+            data = json.loads(clean)
+            label = str(data.get("label", "")).strip().lower()
+            if label not in _LLM_LABEL_TO_EMOJI:
+                return None
+            delta = float(data.get("score_delta", 0.0))
+            # Guard against adversarial deltas.
+            delta = max(-0.15, min(0.15, delta))
+            reason = str(data.get("reason", "")).strip()
+            if not reason:
+                return None
+            return label, delta, reason
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+    # ------------------------------------------------------------------
+    # Heuristic scoring helpers (unchanged)
+    # ------------------------------------------------------------------
 
     def _tech_novelty(self, item: CrawledItem, evidence: list[str]) -> float:
         """Estimate technical novelty from recency and source layer."""
