@@ -13,10 +13,12 @@ AI Radar 是一个面向 AI 产品 / 技术情报流的多 Agent 雷达系统。
 当前项目已经能跑通这条主链：
 
 - 多源抓取：`arXiv / Product Hunt / Reddit / Notion`
-- 新颖度判断：`Novelty Scorer`
-- 双池推荐：`精准池 / 探索池`
-- 对话深聊：`Chat Agent + SSE`
+- **LLM 规划**：`Orchestrator Agent` 读偏好 + 近期行为，由 LLM 生成今日抓取任务清单
+- **LLM 新颖度判断**：`Novelty Scorer` 启发式4维打分 + LLM 增强 label / reason，规则逻辑作 fallback
+- 双池推荐：`精准池 / 探索池`，今日 Feed 落盘快照，重启不丢
+- **LLM 对话**：`Chat Agent` 以卡片摘要为锚点，检索后由 LLM 合成中文答案，SSE 流式输出
 - 记忆沉淀：`Memory Agent + Notion wiki/raw/preferences`
+- 卡片中文化：批量 LLM 改写，输出情报笔记风格的中文正文
 - 轻量偏好进化：最近 7 天 `open / save / skip` 行为反馈到次日规划
 - 第一批评测脚本：`Novelty / Intent / Wiki Quality / Recommendation Precision@K`
 
@@ -263,6 +265,16 @@ python -m ai_radar.evaluation.recommendation_eval evaluation/data/recommendation
 
 ## 8. 当前局限
 
+### Chat Agent 不是真正的多步自主检索
+
+Chat Agent 当前采用固定顺序单轮检索（Notion wiki → Product Hunt → arXiv → Reddit），
+LLM 在检索完成后一次性合成答案。尚未实现 ReAct 循环——即识别信息缺口后自主决策是否继续补充检索。
+
+### 互审机制是启发式而非第二次 LLM 调用
+
+Novelty Scorer 的"互审"当前实现为维度方差检验（四维分数极差 ≤ 0.35 才通过），
+尚未实现 PRD 设计中换一个 system prompt 视角的第二次 LLM 调用。
+
 ### 评测指标需要真实使用数据
 
 评测脚本框架已就绪（见 `evaluation/`），但当前 `evaluation/data/` 下放的是结构示例，
@@ -277,20 +289,11 @@ python -m ai_radar.evaluation.recommendation_eval evaluation/data/recommendation
 当前偏好进化基于最近 7 天行为的关键词统计，产出 `boosted_topics / suppressed_topics`。
 关键词从卡片标题提取，缺少语义聚类，冷启动阶段（使用不足 7 天）效果有限。
 
-### Filter Bubble 提示未落地到前端
+### 前端若干字段未渲染
 
-后端 `/api/feed` 已经返回 `filter_bubble_warning` 字段
-（连续 5 天探索池全跳过时为 `true`），前端暂未渲染这个字段。
-
-### Dashboard 只有当日快照
-
-Dashboard「情报质量」Tab 展示的是当日数据，没有跨日趋势图。
-`feed_history` 和 `user_actions` 表已建好，趋势折线图尚未实现。
-
-### Chat 意图类型未在界面展示
-
-后端 SSE `event: meta` 里已包含 `intent_type`（`exploratory / deep_dive / comparison`），
-前端 `ChatPage` 目前没有渲染该字段。
+- **Filter Bubble 提示**：后端 `/api/feed` 已返回 `filter_bubble_warning` 字段，前端暂未展示 banner
+- **意图类型**：SSE `event: meta` 已含 `intent_type`，`ChatPage` 暂未渲染
+- **Dashboard 趋势图**：`feed_history` 和 `user_actions` 表已有数据，跨日趋势折线图尚未实现
 
 ### 信息源覆盖有限
 
@@ -306,6 +309,15 @@ Hacker News、GitHub Releases、36氪、即刻等暂未接入。
 
 ## 9. Roadmap
 
+### Chat Agent 升级为 ReAct 多步检索
+
+让 Chat Agent 识别信息缺口后自主决策是否继续补充检索，而不是当前的固定顺序单轮检索。
+
+### Novelty Scorer 互审升级
+
+加第二次换视角 system prompt 的 LLM 调用，分数差 > 0.3 时标记"待确认"，
+替代当前的维度方差启发式检验。
+
 ### 补全评测数据闭环
 
 脚本已就绪，补充真实标注集后可直接产出指标：
@@ -313,21 +325,17 @@ Hacker News、GitHub Releases、36氪、即刻等暂未接入。
 - 积累 `feed_history` 记录后运行 Precision@K
 - 构造意图识别测试集，优化 system prompt 并对比提升前后差距
 
-### Filter Bubble 提示 banner
+### 前端欠账
 
-读取 `/api/feed` 返回的 `filter_bubble_warning`，
-为 `true` 时在 Feed 顶部展示提示，引导用户关注探索池内容。
-
-### Dashboard 历史趋势图
-
-基于 `user_actions` 按日聚合，绘制点开率 / 跳过率 / 探索池命中率折线图。
-`frontend/src/components/SparkLine.tsx` 组件骨架已存在。
+- Filter Bubble banner：读取 `filter_bubble_warning` 字段，在 Feed 顶部展示提示
+- Chat 页意图类型展示：渲染 SSE meta 里的 `intent_type`
+- Dashboard 历史趋势图：基于 `user_actions` 按日聚合，绘制点开率 / 跳过率折线图
 
 ### 偏好进化升级
 
 将当前关键词统计升级为语义方向：
-- embedding 聚类合并同义关键词
-- 或直接用 LLM 读近期行为记录，产出结构化偏好 diff
+- 用 LLM 读近期行为记录，产出结构化偏好 diff
+- 或 embedding 聚类合并同义关键词
 
 ### 扩展信息源
 
@@ -337,7 +345,7 @@ Hacker News、GitHub Releases、36氪、即刻等暂未接入。
 
 ### 部署
 
-- 后端：Railway / Render 部署 Python 服务
+- 后端：Railway / Render 部署 Python 服务（需挂载持久磁盘用于 SQLite 和本地状态）
 - 前端：Vercel import `frontend/` 目录
 - 将 `.env` 环境变量迁移到平台 Secrets
 
